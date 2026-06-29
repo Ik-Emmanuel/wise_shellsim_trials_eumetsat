@@ -22,7 +22,7 @@ from shapely.geometry import shape, mapping, Point, Polygon
 import math
 from ipywidgets import RadioButtons, BoundedFloatText, Layout, IntProgress, VBox, HBox, HTML, Button
 from ipyleaflet import Map, GeoData, LayersControl, FullScreenControl, DrawControl, basemaps
-from ipyleaflet import TileLayer, Marker, Popup, LayerGroup, CircleMarker
+from ipyleaflet import TileLayer, Marker, Popup, LayerGroup, CircleMarker, GeoJSON
 
 from shapely.ops import transform
 import pyproj
@@ -81,6 +81,8 @@ RESULTS["global_selected_polygon_type"] = None  # options are All: if all is sel
 RESULTS["get_polygon"] = None
 RESULTS["area_selection_type"] = None
 RESULTS["buffer_distance"] = 100
+RESULTS["start_date"] = None  # widget holding the selected start date
+RESULTS["end_date"] = None    # widget holding the selected end date
 AREA_SELECTION = None
 selected_polygon = None
 
@@ -256,6 +258,132 @@ def polygon_selected():
     print("No polygon currently selected. Run map_and_select_area(polygon_select), click/draw and confirm area on map")
     return None
 
+
+
+def polygon_selected_tobbox():
+    """
+    Fetches the currently selected polygon and returns its bounding box.
+
+    Works for both selection methods:
+      - "Select": polygon_selected() returns a GeoDataFrame -> use total_bounds
+      - "Draw":   polygon_selected() returns a GeoJSON-like dict -> use shape().bounds
+
+    Returns:
+        tuple: (min_lon, min_lat, max_lon, max_lat), or None if nothing selected.
+    """
+    selected = polygon_selected()
+
+    if selected is None:
+        print("No polygon currently selected. Run map_and_select_area(polygon_select), click/draw and confirm area on map")
+        return None
+
+    # GeoDataFrame (selected from map/shapefile, or a confirmed buffer)
+    if isinstance(selected, gpd.GeoDataFrame):
+        if selected.empty:
+            print("No polygon currently selected.")
+            return None
+        # Ensure geographic CRS so the bbox is in lon/lat
+        if selected.crs is not None and selected.crs.to_epsg() != 4326:
+            selected = selected.to_crs(epsg=4326)
+        bounds = selected.total_bounds  # (minx, miny, maxx, maxy)
+        return tuple(bounds)
+
+    # GeoJSON-like dict (drawn area / buffered drawn area)
+    if isinstance(selected, dict) and 'type' in selected and 'coordinates' in selected:
+        geometry = shape(selected)
+        return geometry.bounds  # (minx, miny, maxx, maxy)
+
+    print("Error: selected area is not in a recognised format (GeoDataFrame or GeoJSON).")
+    return None
+
+
+def date_selection():
+    """
+    Displays widgets to set a start date and an end date for analysis.
+
+    Dates are picked with calendar widgets and stored globally (in RESULTS) so
+    they can be retrieved later with date_selected(). A 'Reset' button clears
+    the currently set dates.
+
+    Returns:
+        tuple: (start_date_picker, end_date_picker) widgets.
+    """
+    style = {'description_width': 'initial'}
+
+    # Calendar pickers for start and end dates
+    start_date_picker = widgets.DatePicker(
+        description='Start date',
+        disabled=False,
+        layout=Layout(width='40%'),
+        style=style
+    )
+
+    end_date_picker = widgets.DatePicker(
+        description='End date',
+        disabled=False,
+        layout=Layout(width='40%'),
+        style=style
+    )
+
+    # Output area to echo the currently selected dates back to the user
+    feedback = widgets.HTML()
+
+    def update_feedback(*args):
+        start = start_date_picker.value.isoformat() if start_date_picker.value else "Not set"
+        end = end_date_picker.value.isoformat() if end_date_picker.value else "Not set"
+        feedback.value = (
+            f"<b style='color:#1a2172'> Start date: </b> {start} "
+            f"<b style='color:#1a2172'> &nbsp; End date: </b> {end}<br>"
+        )
+
+    start_date_picker.observe(update_feedback, "value")
+    end_date_picker.observe(update_feedback, "value")
+
+    # Reset button clears both dates
+    def reset_dates(*args):
+        start_date_picker.value = None
+        end_date_picker.value = None
+        update_feedback()
+
+    reset_button = widgets.Button(description="Reset")
+    reset_button.on_click(reset_dates)
+
+    # Store widgets globally so date_selected() can read them later
+    set_global_result("start_date", start_date_picker, RESULTS)
+    set_global_result("end_date", end_date_picker, RESULTS)
+
+    # Initial feedback
+    update_feedback()
+
+    # Display the widgets and reset button
+    display(HTML("<b style='color:#1a2172'> Use the calendars below to set a start date and an end date for analysis, <span style='color:orange'> or type in format \"MM/DD/YYYY\" (Month/Day/Year) </span>. <p> Use the 'Reset' button to clear the selected dates. </b><br>"))
+    display(start_date_picker)
+    display(end_date_picker)
+    display(reset_button)
+    display(feedback)
+
+    return start_date_picker, end_date_picker
+
+
+def date_selected():
+    """
+    Fetches the currently selected start and end dates.
+
+    Returns:
+        tuple: (start_date, end_date) as strings in 'YYYY-MM-DD' format
+               (e.g. '2021-05-01'), with None for any date not yet set.
+    """
+    start_date_picker = get_global_result("start_date", RESULTS)
+    end_date_picker = get_global_result("end_date", RESULTS)
+
+    if start_date_picker is None or end_date_picker is None:
+        print("No dates set. Run date_select = notebook_dropdowns.date_selection() and pick dates first.")
+        return None, None
+
+    start_date = start_date_picker.value.isoformat() if start_date_picker.value else None
+    end_date = end_date_picker.value.isoformat() if end_date_picker.value else None
+
+    return start_date, end_date
 
 
 def area_selection():
@@ -772,9 +900,34 @@ def draw_site_from_map(gpd_df_sub):
     # Add GeoData layer to the map
     m.add_layer(geo_data)
 
-    # Marker layer to hold markers placed via clicks or drawings
+    # Marker layer to hold markers placed via the Draw-a-marker tool
     marker_layer = LayerGroup(name='Markers')
     m.add_layer(marker_layer)
+
+    # Layer that holds the single rendered selection (polygon / rectangle /
+    # line / circle). Markers live in marker_layer above. Only ONE selection
+    # of any kind is ever kept at a time.
+    selection_layer = LayerGroup(name='Selection')
+    m.add_layer(selection_layer)
+
+    # Guard flag so that clearing the draw control programmatically (which can
+    # itself fire a 'deleted' draw event in some ipyleaflet versions) does not
+    # re-enter handle_draw and wipe the selection we are in the middle of making.
+    _state = {"clearing": False}
+
+    # Render a GeoJSON geometry (Polygon / LineString / Rectangle) as the single
+    # visible selection on the map.
+    def render_selection_geometry(geom):
+        try:
+            feature = {"type": "Feature", "properties": {}, "geometry": geom}
+            gj = GeoJSON(
+                data=feature,
+                style={'color': '#ff0000', 'weight': 4,
+                       'fillColor': '#ff0000', 'fillOpacity': 0.2},
+            )
+            selection_layer.add_layer(gj)
+        except Exception:
+            pass
 
     # Helper to add a marker with hover tooltip and popup showing lat/lon
     def add_marker(lat, lon, make_select=False):
@@ -864,18 +1017,41 @@ def draw_site_from_map(gpd_df_sub):
         circlemarker={},
     )
 
-    # Helper to clear all dropped marker pins and reset the selection
-    def clear_markers():
-        nonlocal selected_area
+    # Helper to clear a LayerGroup across ipyleaflet versions
+    def _clear_layer_group(group):
         try:
-            marker_layer.clear_layers()
+            group.clear_layers()
         except Exception:
             # Fallback for ipyleaflet versions without clear_layers()
-            for lyr in list(marker_layer.layers):
+            for lyr in list(group.layers):
                 try:
-                    marker_layer.remove_layer(lyr)
+                    group.remove_layer(lyr)
                 except Exception:
                     pass
+
+    # Remove the draw control's own rendered shapes. Guarded so the resulting
+    # 'deleted' event (fired by some ipyleaflet versions) doesn't re-enter
+    # handle_draw. We deliberately do NOT touch draw_control.data here: setting
+    # it to [] makes the frontend echo an empty-data update and forces a map
+    # bounds re-sync, which both wiped the selection and raised the
+    # "'east' trait expected a float, not None" TraitError.
+    def clear_draw_control():
+        _state["clearing"] = True
+        try:
+            draw_control.clear()
+        except Exception:
+            pass
+        finally:
+            _state["clearing"] = False
+
+    # Clear EVERYTHING: dropped marker pin, rendered selection, the draw
+    # control's own shapes, and reset the stored selection. Enforces the
+    # "only one selection at a time" rule.
+    def clear_selection():
+        nonlocal selected_area
+        _clear_layer_group(marker_layer)
+        _clear_layer_group(selection_layer)
+        clear_draw_control()
         selected_area = None
         html.value = "<b> Draw an area on the map below, using the left-hand toolbar, within the highlighted boundary.</b>"
         try:
@@ -884,82 +1060,75 @@ def draw_site_from_map(gpd_df_sub):
         except Exception:
             pass
 
-    # Handle drawings (polygons, circles, markers etc.)
+    # Store a polygon/line/circle geometry as the single selection and render it
+    def set_area_geometry(geom):
+        nonlocal selected_area
+        selected_area = geom
+        render_selection_geometry(geom)
+        html.value = f"<b> <span style='color:orange'> Selected Area: </span> <br> <b style='color:#1a2172'> {selected_area} </b></b>"
+        try:
+            set_global_result("global_selected_area", selected_area, RESULTS)
+            set_global_result("final_area_selection", None, RESULTS)
+        except Exception:
+            pass
+
+    # Handle drawings made from the toolbar (rectangle, polygon, line, circle,
+    # marker). A selection is ONLY ever made through these tools — a plain click
+    # on the map does nothing. Every new drawing clears the previous one so that
+    # exactly one area (or one marker point) exists at any time.
     def handle_draw(self, action, geo_json):
         nonlocal selected_area
-        # The trash / "Clear All" button fires a 'deleted' action: also remove
-        # any marker pins we dropped (they live in marker_layer, not in the
-        # DrawControl's own layers, so they aren't cleared automatically).
-        if action == 'deleted':
-            clear_markers()
+        # Ignore events fired by our own programmatic clears (clear() can emit a
+        # 'deleted' event in some ipyleaflet versions).
+        if _state["clearing"]:
             return
-        # If a Point is drawn (a marker), add the nice popup/tooltip behavior
-        if geo_json['geometry']['type'] == 'Point':
-            coords = geo_json['geometry']['coordinates']  # [lon, lat]
-            lon, lat = coords[0], coords[1]
-            # Add marker to map and treat it as selected area
-            add_marker(lat, lon, make_select=True)
-        elif geo_json['geometry']['type'] == 'GeometryCollection' and geo_json.get('properties', {}).get('shape') == 'circle':
-            # Some draw tools represent circles differently; try to extract center/radius
-            try:
-                center = geo_json['geometry']['geometries'][0]['coordinates']
-                radius = geo_json['properties']['style'].get('radius', None)
-                if radius is not None:
-                    selected = point_to_circle(center, radius)
-                    selected_area = selected
-                    html.value = f"<b> <span style='color:orange'> Selected Area: </span> <br> <b style='color:#1a2172'> {selected_area} </b></b>"
-                    set_global_result("global_selected_area", selected_area, RESULTS)
-                    set_global_result("final_area_selection", None, RESULTS)
-            except Exception:
-                pass
-        else:
-            # Polygons, rectangles, lines: keep existing handling
-            if geo_json['geometry']['type'] == 'Point' and 'properties' in geo_json and 'style' in geo_json['properties']:
-                # fallback handling for circles represented as points
-                center = geo_json['geometry']['coordinates']
-                if 'radius' in geo_json['properties']['style']:
-                    selected_area = point_to_circle(center, geo_json['properties']['style']['radius'])
-                else:
-                    selected_area = geo_json['geometry']
-            else:
-                selected_area = geo_json['geometry']
+        # The trash / "Clear All" button fires a 'deleted' action.
+        if action == 'deleted':
+            clear_selection()
+            return
+        # Only react to a freshly created shape.
+        if action != 'created':
+            return
 
-            html.value = f"<b> <span style='color:orange'> Selected Area: </span> <br> <b style='color:#1a2172'> {selected_area} </b></b>"
+        # Remove any previous selection (old shape, marker, and the draw
+        # control's native shapes — including the one just drawn, which we
+        # re-render ourselves below). This enforces a single selection without
+        # touching draw_control.data, so nothing gets wiped by a frontend echo.
+        _clear_layer_group(marker_layer)
+        _clear_layer_group(selection_layer)
+        clear_draw_control()
+
+        geometry = geo_json.get('geometry', {})
+        gtype = geometry.get('type')
+        props = geo_json.get('properties', {}) or {}
+        style = props.get('style', {}) or {}
+
+        if gtype == 'Point' and 'radius' not in style and props.get('shape') != 'circle':
+            # A marker placed with the Draw-a-marker tool: single point only.
+            lon, lat = geometry['coordinates'][0], geometry['coordinates'][1]
+            add_marker(lat, lon, make_select=True)
+        elif gtype == 'GeometryCollection' and props.get('shape') == 'circle':
+            # Circle represented as a GeometryCollection with a radius.
             try:
-                set_global_result("global_selected_area", selected_area, RESULTS)
-                set_global_result("final_area_selection", None, RESULTS)
+                center = geometry['geometries'][0]['coordinates']
+                radius = style.get('radius', None)
+                if radius is not None:
+                    set_area_geometry(point_to_circle(center, radius))
             except Exception:
                 pass
+        elif gtype == 'Point' and 'radius' in style:
+            # Circle represented as a point + radius.
+            set_area_geometry(point_to_circle(geometry['coordinates'], style['radius']))
+        else:
+            # Polygons, rectangles, lines.
+            set_area_geometry(geometry)
 
     draw_control.on_draw(handle_draw)
 
-    # Belt-and-suspenders: some ipyleaflet versions don't emit a 'deleted'
-    # action for the trash "Clear All". Watch the draw data instead and clear
-    # the marker pins whenever the drawn features are emptied.
-    def on_draw_data_change(change):
-        if not change.get('new'):
-            clear_markers()
-
-    try:
-        draw_control.observe(on_draw_data_change, names='data')
-    except Exception:
-        pass
-
     m.add_control(draw_control)
 
-    # Map click handler: place a marker where user clicks
-    def on_map_interaction(**kwargs):
-        # ipyleaflet fires interactions with type 'click' and coordinates (lat, lon)
-        if kwargs.get('type') == 'click' and 'coordinates' in kwargs:
-            lat, lon = kwargs['coordinates'][0], kwargs['coordinates'][1]
-            # Add a marker for this click and mark it as selected
-            add_marker(lat, lon, make_select=True)
-
-    try:
-        m.on_interaction(on_map_interaction)
-    except Exception:
-        # older/newer ipyleaflet versions may have different method names; ignore if not present
-        pass
+    # NOTE: a plain click on the map intentionally does NOT create a point.
+    # Points are only added via the Draw-a-marker tool in the toolbar.
 
     # Add controls to the map
     m.add_control(LayersControl(position='topright'))
@@ -1148,7 +1317,7 @@ def visualize_selected_area():
 
             # Display the map, button, and area in hectares
             
-            display(HTML("<b style='color:#1a2172'> Check that area displayed is your area of interest before proceeding. If not, reselect area above. <p> If the area is correct proceed to add a buffer or to section 2.0. </b><br>"))
+            display(HTML("<b style='color:#1a2172'> Check that area displayed is your area of interest before proceeding. If not, reselect area above </b>"))
             display(HTML(f"<b style='color:#1a2172'> Selected area: {area_ha:.2f} hectares </b><br>"))
             display(VBox([HTML("<b></b>"), selected_map, HTML(f"Area: {area_ha:.2f} hectares")]))
         else:

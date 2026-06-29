@@ -1,0 +1,68 @@
+check_conservation: false
+require_initialization: false
+instances:
+  Oyster:                       # generic name of the module
+    model: shellsim_base        # standard name of the module
+    long_name: M. gigas         # generic name for the outputs
+    parameters:
+      #seed_DSTW: 0.08461     # Dry Soft Weight of the seed, to be specified only if sub-optimal condition are desired
+      speciesID: 2              # id number of the species (1- Blue Mussel; 2- Pacific oyster)
+      seed_TFW: 5.0             # total fresh weight of the seed (g)
+      Seed_Shell_Length: 0.0    # shell length of the seed (cm)
+      death_trigger: 0.4        # ratio of the Target energy ratio that trigger mortality
+      Ploidy: 2                 # ploidy status (0- diploid; 1- triploid I; 2- triploid II)
+      nprey: 1                  # number of food source item
+      prey1ischl: true          # identify first prey source as chlorophyll
+      # prey2isPOC: false          # identify second prey source as Particulate Organic Carbon
+      # prey3isPOM: false          # identify third prey source as Particulate Organic Matter
+      #prey4isTPM: true          # identify fourth prey source as Total Particulate Matter
+      death0: 0.0               # mortality rate for shell length between 0 and 1 cm
+      death1: 0.0               # mortality rate for shell length between 1 and 2 cm
+      death2: 0.0               # mortality rate for shell length between 2 and 3 cm
+      death3: 0.0               # mortality rate for shell length between 3 and 4 cm
+      death4: 0.0               # mortality rate for shell length between 4 and 5 cm
+      death5: 0.0               # mortality rate for shell length above 5 cm
+      harv_TFW: 25.0            # Total Fresh Weight of marketable shellfish (g)
+    coupling:
+      DOXY: O2/c                # link to oxygen module
+      prey1: Chl1               # link to module for first prey
+      # prey2: POC1               # link to module for second prey
+      # prey3: POM1               # link to module for third prey
+      #prey4: TPM1               # link to module for fourth prey
+    initialization:
+      C1: 100.0                 # initial number of individual in class C1
+  Chl1:                       # generic name of the module
+    model: shellsim/prey      # standard name of the module
+    long_name: Chlorophyll    # generic name fort the outputs
+    parameters:
+      composition: h          # standard name for type of prey (h: Chlorophyll; c: POC; m: POM, t: TPM) 
+    initialization:
+      Chl: 6.0                # initial value of cholorphyll [mg/m3 or ug/L]
+  # POC1:                       # generic name of the module
+  #   model: shellsim/prey      # standard name of the module
+  #   long_name: Particulate Organic Carbon  # generic name for the outputs
+  #   parameters:
+  #     composition: c          # standard name for type of prey (h: Chlorophyll; c: POC; m: POM, t: TPM) 
+  #   initialization:
+  #     POC: 1400.0             # initial value of POC [mg/m3 or ug/L]
+  # POM1:                       # generic name of the module
+  #   model: shellsim/prey      # standard name of the module
+  #   long_name: Particulate Organic Matter  # generic name for the outputs
+  #   parameters:
+  #     composition: m          # standard name for type of prey (h: Chlorophyll; c: POC; m: POM, t: TPM) 
+  #   initialization:
+  #     POM: 40.0               # initial value of POM [g/m3 or mg/L]
+  # TPM1:                       # generic name of the module
+  #   long_name: Total Particulate Matter  # generic name for the outptus
+  #   model: shellsim/prey      # standard name of the module
+  #   parameters:
+  #     composition: t          # standard name for type of prey (h: Chlorophyll; c: POC; m: POM, t: TPM)
+  #   initialization:
+  #     TPM: 100.0              # inital value of TPM [g/m3 or mg/L]
+  O2:                         # generic name of the module
+    model: bb/passive         # standard name of the module
+    long_name: Oxygen         # generic name for the output
+    parameters:
+      units: mg/L
+    initialization:
+      c: 10.                 # initial value of Oxygen [mg/L]
